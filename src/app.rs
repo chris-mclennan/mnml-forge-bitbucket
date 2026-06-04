@@ -1,16 +1,40 @@
 //! App state — what's loaded, what's selected, the configured query
 //! for each tab.
 
-use crate::bitbucket::{Client, PullRequest};
+use crate::bitbucket::{Client, Comment, PullRequest};
 use crate::config::{Config, Tab};
 use anyhow::Result;
+use std::collections::HashMap;
 
 pub struct App {
     pub cfg: Config,
     pub client: Client,
+    /// Authenticated user's account_id, resolved at startup. Drives
+    /// the approve/unapprove toggle + the "✓ approved by you" badge.
+    /// `None` ⇒ no Account:Read scope or whoami failed.
+    pub me_account_id: Option<String>,
     pub tabs: Vec<TabState>,
     pub active_tab: usize,
     pub status: String,
+    /// Right-half detail panel visibility (toggled with `d`).
+    pub details_visible: bool,
+    /// First-line offset into the detail body (`Ctrl+U/D` scroll).
+    pub details_scroll: u16,
+    /// Per-PR detail cache, keyed by (workspace, repo, id). Survives
+    /// arrow-key navigation so re-selecting a focused row doesn't
+    /// re-fetch.
+    pub detail_cache: HashMap<(String, String, i64), DetailEntry>,
+    /// In-flight detail key (so we don't fire a second fetch on top of
+    /// a pending one). `None` when idle.
+    pub detail_in_flight: Option<(String, String, i64)>,
+}
+
+/// Cached PR detail + comments. Fetched lazily on first focus while
+/// the detail panel is open.
+#[derive(Debug, Clone)]
+pub struct DetailEntry {
+    pub pr: PullRequest,
+    pub comments: Vec<Comment>,
 }
 
 pub struct TabState {
@@ -138,12 +162,124 @@ impl App {
         let mut app = App {
             cfg,
             client,
+            me_account_id,
             tabs,
             active_tab: 0,
             status,
+            details_visible: false,
+            details_scroll: 0,
+            detail_cache: HashMap::new(),
+            detail_in_flight: None,
         };
         app.refresh_active().await;
         Ok(app)
+    }
+
+    /// `(workspace, repo, id)` of the focused PR, or `None` if the
+    /// active tab has no PRs. Used as the cache key for the detail
+    /// panel.
+    pub fn focused_key(&self) -> Option<(String, String, i64)> {
+        let tab = self.active();
+        let pr = tab.prs.get(tab.selected)?;
+        // Bitbucket's `repo_short` returns "workspace/repo"; we split
+        // here rather than building a separate accessor since this is
+        // the only place we need the parts.
+        let full = pr.repo_short();
+        let (workspace, repo) = full.split_once('/').unwrap_or(("", full.as_str()));
+        Some((workspace.to_string(), repo.to_string(), pr.id))
+    }
+
+    /// Toggle the right-half detail panel. Opening lazily fetches the
+    /// detail; closing keeps the cache around.
+    pub async fn toggle_details(&mut self) {
+        self.details_visible = !self.details_visible;
+        self.details_scroll = 0;
+        if self.details_visible {
+            self.ensure_focused_detail().await;
+        }
+    }
+
+    /// Fetch the detail for the focused PR if not cached and not
+    /// in-flight. No-op on tabs with empty PR lists.
+    pub async fn ensure_focused_detail(&mut self) {
+        let Some(key) = self.focused_key() else {
+            return;
+        };
+        if self.detail_cache.contains_key(&key) || self.detail_in_flight.as_ref() == Some(&key) {
+            return;
+        }
+        self.detail_in_flight = Some(key.clone());
+        let (ws, repo, id) = key.clone();
+        let pr_res = self.client.get_pr_detail(&ws, &repo, id).await;
+        let comments_res = self.client.get_pr_comments(&ws, &repo, id).await;
+        self.detail_in_flight = None;
+        match (pr_res, comments_res) {
+            (Ok(pr), Ok(comments)) => {
+                self.detail_cache.insert(key, DetailEntry { pr, comments });
+            }
+            (Err(e), _) | (_, Err(e)) => {
+                self.status = format!("detail fetch failed: {e}");
+            }
+        }
+    }
+
+    /// Drop the cached detail for the focused PR so the next focus
+    /// re-fetches. Triggered by `r` while the panel is open.
+    pub fn invalidate_focused_detail(&mut self) {
+        if let Some(key) = self.focused_key() {
+            self.detail_cache.remove(&key);
+        }
+    }
+
+    /// Approve or unapprove the focused PR, based on the current
+    /// state of the cached detail. No-op if the panel isn't open or
+    /// we don't have an `account_id` to compare against.
+    pub async fn toggle_approval(&mut self) {
+        let Some(key) = self.focused_key() else {
+            return;
+        };
+        let Some(me) = self.me_account_id.clone() else {
+            self.status = "approve needs Account:Read on the app password".to_string();
+            return;
+        };
+        let approved = self
+            .detail_cache
+            .get(&key)
+            .map(|d| d.pr.approved_by(&me))
+            .unwrap_or(false);
+        let (ws, repo, id) = key.clone();
+        let result = if approved {
+            self.client.unapprove_pr(&ws, &repo, id).await
+        } else {
+            self.client.approve_pr(&ws, &repo, id).await
+        };
+        match result {
+            Ok(()) => {
+                self.status = if approved {
+                    format!("unapproved {ws}/{repo}#{id}")
+                } else {
+                    format!("approved {ws}/{repo}#{id}")
+                };
+                // Drop the cached detail so a fresh fetch picks up
+                // the updated participant record + approval count.
+                self.detail_cache.remove(&key);
+                self.ensure_focused_detail().await;
+            }
+            Err(e) => {
+                self.status = format!("approval toggle failed: {e}");
+            }
+        }
+    }
+
+    pub fn scroll_detail(&mut self, delta: i32) {
+        if !self.details_visible {
+            return;
+        }
+        if delta >= 0 {
+            self.details_scroll = self.details_scroll.saturating_add(delta as u16);
+        } else {
+            self.details_scroll = self.details_scroll.saturating_sub((-delta) as u16);
+        }
     }
 
     pub fn active(&self) -> &TabState {

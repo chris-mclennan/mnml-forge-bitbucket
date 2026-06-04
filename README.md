@@ -138,11 +138,41 @@ BBQL reference:
 | `PgUp` / `PgDn`      | Jump 10 rows                                      |
 | `g` / `G`            | Top / bottom                                      |
 | `Enter` / `o`        | Open focused PR in your browser                   |
-| `r`                  | Refresh active tab                                |
+| `d`                  | Toggle right-half PR detail panel                 |
+| `Ctrl+U` / `Ctrl+D`  | Scroll detail panel up / down (when open)         |
+| `a`                  | Toggle your approval on the focused PR (detail panel must be open) |
+| `r`                  | Refresh active tab (+ detail if open)             |
 | `q` / `Esc` / `Ctrl+C` | Quit                                            |
 
 Auto-refresh runs every `refresh_interval_secs` seconds (default `60`,
 set to `0` to disable).
+
+### Detail panel
+
+`d` opens a right-half panel for the focused PR: header (state ·
+branches · author · updated · approval chip), then title, description,
+then up to the last 20 comments (most-recent first). Detail content is
+lazy-loaded on first focus and cached per `(workspace, repo, id)` —
+arrow-keying through a long list only fetches once per PR.
+
+`r` while the detail panel is open invalidates the cached detail for
+the focused PR and re-fetches both the list and the detail — useful
+after a new comment landed server-side.
+
+The approval chip shows either `✓ you approved · N total` or
+`○ not approved · N total`. `N` is the count of approving participants
+on the PR (including you).
+
+### Approve / unapprove
+
+`a` (with the detail panel open) toggles your approval. The viewer
+reads the current state from the cached participant record and POSTs
+or DELETEs `/pullrequests/{id}/approve` accordingly, then drops the
+cache so a re-fetch picks up the new state.
+
+Requires **Account: Read** on the app password — otherwise the viewer
+can't resolve your `account_id` and the toggle is a no-op with an
+explanatory toast.
 
 ## Two run modes
 
@@ -181,20 +211,21 @@ Setting `[[ui.integration_icon]]` **replaces** mnml's built-in
 defaults, so copy them in first if you want to extend rather than
 replace.
 
-## Limitations (v0.1)
+## Limitations
 
 - **PRs only.** Bitbucket Cloud's issue tracker isn't covered — most
-  teams use Jira for issues, and the API surface is small enough that
-  a v0.2 add is straightforward if anyone wants it.
-- **First page only.** The Bitbucket API caps `pagelen` at 50 and
-  v0.1 doesn't paginate. For tabs with >50 open PRs, the oldest are
-  truncated.
-- **No detail panel.** v0.2 — the family pattern (description /
-  comments / approve toggle) ports from `mnml-tickets-jira`.
+  teams use Jira for issues. Add it if anyone wants it.
+- **First page only.** The Bitbucket API caps `pagelen` at 50 and the
+  viewer doesn't paginate yet. For tabs with >50 open PRs, the oldest
+  are truncated.
+- **First-comment-page only on detail.** Same `pagelen` cap on
+  `/pullrequests/{id}/comments`. v0.3.
+- **Merge / decline aren't wired.** v0.3 — both are behind a
+  confirmation modal once added.
 
 ## Status
 
-**v0.1** (current):
+**v0.2** (current):
 
 - Standalone + blit-host modes
 - Per-repo tabs with state filter (OPEN / MERGED / DECLINED / SUPERSEDED)
@@ -202,6 +233,9 @@ replace.
 - Custom `q` BBQL for layered filters
 - 1-9 / Tab / Enter navigation · `r` refresh
 - Auto-refresh on `refresh_interval_secs`
+- `d` right-half detail panel — header + description + last 20 comments, lazy-loaded + cached per PR
+- `Ctrl+U` / `Ctrl+D` scroll the detail panel
+- `a` approve / unapprove toggle with `✓ you approved · N total` chip
 - `--check` for resolved-config + whoami verification
 
 ## License

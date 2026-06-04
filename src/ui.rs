@@ -78,8 +78,159 @@ pub fn draw(f: &mut Frame, app: &App) {
         ])
         .split(size);
     draw_tabs(f, chunks[0], app);
-    draw_table(f, chunks[1], app);
+    if app.details_visible {
+        let body = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(chunks[1]);
+        draw_table(f, body[0], app);
+        draw_detail(f, body[1], app);
+    } else {
+        draw_table(f, chunks[1], app);
+    }
     draw_status(f, chunks[2], app);
+}
+
+fn draw_detail(f: &mut Frame, area: Rect, app: &App) {
+    let Some(key) = app.focused_key() else {
+        let p = Paragraph::new("(no PR focused)")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(Block::default().borders(Borders::ALL).title(" detail "));
+        f.render_widget(p, area);
+        return;
+    };
+    let entry = match app.detail_cache.get(&key) {
+        Some(e) => e,
+        None => {
+            let msg = if app.detail_in_flight.as_ref() == Some(&key) {
+                "loading detail…"
+            } else {
+                "(no detail cached — press d to refresh)"
+            };
+            let p = Paragraph::new(msg)
+                .style(Style::default().fg(Color::DarkGray))
+                .block(Block::default().borders(Borders::ALL).title(" detail "));
+            f.render_widget(p, area);
+            return;
+        }
+    };
+    let pr = &entry.pr;
+    let (ws, repo, id) = (&key.0, &key.1, key.2);
+    let me_approved = app
+        .me_account_id
+        .as_deref()
+        .map(|m| pr.approved_by(m))
+        .unwrap_or(false);
+    let approval_chip = if me_approved {
+        Span::styled(
+            format!("✓ you approved · {} total", pr.approval_count()),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )
+    } else {
+        Span::styled(
+            format!("○ not approved · {} total", pr.approval_count()),
+            Style::default().fg(Color::Yellow),
+        )
+    };
+    let title = format!(" {ws}/{repo}#{id} ");
+
+    let header_lines = vec![
+        Line::from(vec![
+            Span::styled(
+                pr.state.clone(),
+                Style::default().fg(state_color(&pr.state)),
+            ),
+            Span::raw(" · "),
+            Span::raw(format!(
+                "{} → {}",
+                pr.source
+                    .as_ref()
+                    .and_then(|b| b.branch.as_ref().map(|n| n.name.clone()))
+                    .unwrap_or_else(|| "?".into()),
+                pr.destination
+                    .as_ref()
+                    .and_then(|b| b.branch.as_ref().map(|n| n.name.clone()))
+                    .unwrap_or_else(|| "?".into()),
+            )),
+        ]),
+        Line::from(format!(
+            "author: {} · updated: {}",
+            pr.author
+                .as_ref()
+                .map(|u| u.display_name.as_str())
+                .unwrap_or("—"),
+            pr.updated_date()
+        )),
+        Line::from(approval_chip),
+        Line::from(""),
+        Line::from(Span::styled(
+            pr.title.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+    ];
+
+    let mut body: Vec<Line> = header_lines;
+    if let Some(desc) = &pr.description
+        && !desc.raw.trim().is_empty()
+    {
+        for line in desc.raw.lines() {
+            body.push(Line::from(line.to_string()));
+        }
+        body.push(Line::from(""));
+    } else {
+        body.push(Line::from(Span::styled(
+            "(no description)",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )));
+        body.push(Line::from(""));
+    }
+
+    body.push(Line::from(Span::styled(
+        format!("comments ({}, most-recent first):", entry.comments.len()),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )));
+    body.push(Line::from(""));
+
+    // Bitbucket returns comments oldest-first; reverse so the detail
+    // panel matches the jira viewer's most-recent-first convention.
+    for c in entry.comments.iter().rev().take(20) {
+        let head = Line::from(vec![
+            Span::styled(
+                format!("  {} · ", c.author()),
+                Style::default().fg(Color::Cyan),
+            ),
+            Span::styled(c.created_date(), Style::default().fg(Color::DarkGray)),
+        ]);
+        body.push(head);
+        for line in c.body().lines() {
+            body.push(Line::from(format!("    {line}")));
+        }
+        body.push(Line::from(""));
+    }
+
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let p = Paragraph::new(body)
+        .block(block)
+        .scroll((app.details_scroll, 0))
+        .wrap(ratatui::widgets::Wrap { trim: false });
+    f.render_widget(p, area);
+}
+
+fn state_color(state: &str) -> Color {
+    match state {
+        "OPEN" => Color::Green,
+        "MERGED" => Color::Magenta,
+        "DECLINED" => Color::Red,
+        "SUPERSEDED" => Color::DarkGray,
+        _ => Color::Gray,
+    }
 }
 
 fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
@@ -153,13 +304,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
             let repo = p.repo_short();
             let key = format!("#{}", p.id);
             let state = p.state.clone();
-            let state_style = match state.as_str() {
-                "OPEN" => Style::default().fg(Color::Green),
-                "MERGED" => Style::default().fg(Color::Magenta),
-                "DECLINED" => Style::default().fg(Color::Red),
-                "SUPERSEDED" => Style::default().fg(Color::DarkGray),
-                _ => Style::default().fg(Color::Gray),
-            };
+            let state_style = Style::default().fg(state_color(&state));
             let author = p
                 .author
                 .as_ref()
@@ -217,7 +362,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
-    let hint = " 1-9 tab · ↑↓/jk move · Enter/o open · r refresh · q quit ";
+    let hint = " 1-9 tab · ↑↓/jk move · Enter/o open · d detail · a approve · r refresh · q quit ";
     let line = Line::from(vec![
         Span::styled(
             format!(" {} ", app.status),
