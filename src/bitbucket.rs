@@ -23,7 +23,7 @@ impl Client {
     pub fn new(email: &str, app_password: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent(concat!(
-                "mnml-tickets-bitbucket/",
+                "mnml-forge-bitbucket/",
                 env!("CARGO_PKG_VERSION")
             ))
             .build()?;

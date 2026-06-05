@@ -929,7 +929,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "mnml-tickets-bitbucket"
+name = "mnml-forge-bitbucket"
 version = "0.2.0"
 dependencies = [
  "anyhow",

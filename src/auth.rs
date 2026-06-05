@@ -1,5 +1,5 @@
 //! Bitbucket Cloud app-password loader. Reads
-//! `~/.config/mnml-tickets-bitbucket/token` (one line, `chmod 600`).
+//! `~/.config/mnml-forge-bitbucket/token` (one line, `chmod 600`).
 //!
 //! Create one at:
 //!   <https://bitbucket.org/account/settings/app-passwords/>
@@ -15,7 +15,7 @@ pub fn token_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config")
-        .join("mnml-tickets-bitbucket")
+        .join("mnml-forge-bitbucket")
         .join("token")
 }
 

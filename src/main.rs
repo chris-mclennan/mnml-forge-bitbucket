@@ -11,7 +11,7 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "mnml-tickets-bitbucket",
+    name = "mnml-forge-bitbucket",
     version,
     about = "Bitbucket Cloud PR viewer for mnml"
 )]
@@ -22,7 +22,7 @@ struct Cli {
     check: bool,
     /// Blit-host mode — render into a UDS-served cell grid instead of
     /// the local terminal. Used by mnml / tmnl to host this binary as
-    /// a pane (`:host.launch mnml-tickets-bitbucket`).
+    /// a pane (`:host.launch mnml-forge-bitbucket`).
     #[arg(long, value_name = "SOCKET")]
     blit: Option<String>,
 }

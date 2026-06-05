@@ -1,4 +1,4 @@
-# Contributing to mnml-tickets-bitbucket
+# Contributing to mnml-forge-bitbucket
 
 Thanks for taking a look! This repo is part of the [mnml integration family](https://mnml.sh/manual/integrations/community/) — a standalone Bitbucket Cloud pull-request viewer that doubles as a hosted mnml pane.
 
@@ -14,8 +14,8 @@ Thanks for taking a look! This repo is part of the [mnml integration family](htt
 src/
 ├── main.rs                # CLI + mode dispatch (TUI / --blit / --check)
 ├── app.rs                 # state — tabs, PR lists, selection, TabSpec::resolve
-├── config.rs              # ~/.config/mnml-tickets-bitbucket.toml
-├── auth.rs                # app-password loader from ~/.config/mnml-tickets-bitbucket/token
+├── config.rs              # ~/.config/mnml-forge-bitbucket.toml
+├── auth.rs                # app-password loader from ~/.config/mnml-forge-bitbucket/token
 ├── bitbucket.rs           # ← Bitbucket Cloud REST v2 client (swap this when forking)
 ├── keys.rs                # action enum + key bindings
 ├── ui.rs                  # ratatui draw + crossterm loop
@@ -27,15 +27,15 @@ src/
 ## Local development
 
 ```sh
-git clone https://github.com/chris-mclennan/mnml-tickets-bitbucket
-cd mnml-tickets-bitbucket
+git clone https://github.com/chris-mclennan/mnml-forge-bitbucket
+cd mnml-forge-bitbucket
 cargo build
 cargo test
 cargo clippy --all-targets        # must be warning-free
 cargo fmt                          # before committing
 ```
 
-You'll need a Bitbucket app password (free Bitbucket Cloud account works) to test against the real API. Set up under <https://bitbucket.org/account/settings/app-passwords/> with **Pull requests: Read** + **Account: Read** scopes. Save it to `~/.config/mnml-tickets-bitbucket/token` and run `cargo run -- --check`.
+You'll need a Bitbucket app password (free Bitbucket Cloud account works) to test against the real API. Set up under <https://bitbucket.org/account/settings/app-passwords/> with **Pull requests: Read** + **Account: Read** scopes. Save it to `~/.config/mnml-forge-bitbucket/token` and run `cargo run -- --check`.
 
 ## PR conventions
 

@@ -1,4 +1,4 @@
-# mnml-tickets-bitbucket
+# mnml-forge-bitbucket
 
 Bitbucket Cloud pull-request viewer for [mnml](https://mnml.sh) —
 terminal TUI with configurable tabs (per-repo, "PRs I opened",
@@ -23,7 +23,7 @@ and [github](https://github.com/chris-mclennan/mnml-tickets-github).
 ## Install
 
 ```sh
-cargo install --git https://github.com/chris-mclennan/mnml-tickets-bitbucket mnml-tickets-bitbucket
+cargo install --git https://github.com/chris-mclennan/mnml-forge-bitbucket mnml-forge-bitbucket
 ```
 
 Homebrew tap + binary releases will follow once the binary stabilises.
@@ -37,22 +37,22 @@ Homebrew tap + binary releases will follow once the binary stabilises.
    you want `mode = "mine"` / `mode = "reviewing"` tabs (those need
    `/2.0/user` to resolve your account_id).
 
-2. **Save the app password** to `~/.config/mnml-tickets-bitbucket/token`
+2. **Save the app password** to `~/.config/mnml-forge-bitbucket/token`
    with `chmod 600`:
 
    ```sh
-   mkdir -p ~/.config/mnml-tickets-bitbucket
-   pbpaste > ~/.config/mnml-tickets-bitbucket/token   # or paste it in $EDITOR
-   chmod 600 ~/.config/mnml-tickets-bitbucket/token
+   mkdir -p ~/.config/mnml-forge-bitbucket
+   pbpaste > ~/.config/mnml-forge-bitbucket/token   # or paste it in $EDITOR
+   chmod 600 ~/.config/mnml-forge-bitbucket/token
    ```
 
 3. **Run once** to scaffold the config template:
 
    ```sh
-   mnml-tickets-bitbucket
+   mnml-forge-bitbucket
    ```
 
-   Writes `~/.config/mnml-tickets-bitbucket.toml`. Edit `email`,
+   Writes `~/.config/mnml-forge-bitbucket.toml`. Edit `email`,
    `workspace`, and the `[[tabs]]` list.
 
 4. **Re-run** — the TUI launches with your configured tabs.
@@ -60,7 +60,7 @@ Homebrew tap + binary releases will follow once the binary stabilises.
 5. **Verify** the resolved config + auth state:
 
    ```sh
-   mnml-tickets-bitbucket --check
+   mnml-forge-bitbucket --check
    ```
 
    Hits `/2.0/user` to confirm the app password works.
@@ -179,7 +179,7 @@ explanatory toast.
 ### Standalone
 
 ```sh
-mnml-tickets-bitbucket
+mnml-forge-bitbucket
 ```
 
 Works in any terminal. No mnml required.
@@ -187,7 +187,7 @@ Works in any terminal. No mnml required.
 ### Blit-host (hosted as an mnml pane)
 
 ```vim
-:host.launch mnml-tickets-bitbucket
+:host.launch mnml-forge-bitbucket
 ```
 
 mnml spawns it with `--blit <socket>` and renders the streamed cell
@@ -202,7 +202,7 @@ for the protocol details.
 id       = "bitbucket"
 glyph    = "\U000F0093"            # nf-md-bitbucket
 fallback = "B"
-command  = ":host.launch mnml-tickets-bitbucket"
+command  = ":host.launch mnml-forge-bitbucket"
 color    = "blue"
 tooltip  = "Open Bitbucket PRs"
 ```

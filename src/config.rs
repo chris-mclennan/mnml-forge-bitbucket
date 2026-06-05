@@ -1,4 +1,4 @@
-//! Config file at `~/.config/mnml-tickets-bitbucket.toml`. First run
+//! Config file at `~/.config/mnml-forge-bitbucket.toml`. First run
 //! writes the scaffold + exits with instructions.
 
 use anyhow::{Result, anyhow};
@@ -65,7 +65,7 @@ fn default_state() -> String {
 }
 
 impl Config {
-    pub const EXAMPLE: &'static str = r##"# mnml-tickets-bitbucket config. Edit and re-run.
+    pub const EXAMPLE: &'static str = r##"# mnml-forge-bitbucket config. Edit and re-run.
 #
 # Required:
 #   email        — your Atlassian / Bitbucket account email
@@ -150,7 +150,7 @@ pub fn config_path() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".config")
-        .join("mnml-tickets-bitbucket.toml")
+        .join("mnml-forge-bitbucket.toml")
 }
 
 pub fn load() -> Result<Config> {
