@@ -22,10 +22,7 @@ pub struct Client {
 impl Client {
     pub fn new(email: &str, app_password: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
-            .user_agent(concat!(
-                "mnml-forge-bitbucket/",
-                env!("CARGO_PKG_VERSION")
-            ))
+            .user_agent(concat!("mnml-forge-bitbucket/", env!("CARGO_PKG_VERSION")))
             .build()?;
         let basic = B64.encode(format!("{email}:{app_password}"));
         Ok(Self {
@@ -180,6 +177,64 @@ impl Client {
             return Err(anyhow!("bitbucket unapprove {status}: {text}"));
         }
         Ok(())
+    }
+
+    /// Recent pipelines (builds) for a repo, newest-first.
+    pub async fn list_pipelines(
+        &self,
+        workspace: &str,
+        repo: &str,
+        per_page: u32,
+    ) -> Result<Vec<Pipeline>> {
+        let url = format!("{BASE}/repositories/{workspace}/{repo}/pipelines/");
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", &self.auth_header)
+            .header("Accept", "application/json")
+            .query(&[
+                ("pagelen", per_page.to_string()),
+                ("sort", "-created_on".to_string()),
+            ])
+            .send()
+            .await
+            .context("bitbucket pipelines list failed")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("bitbucket pipelines {status}: {text}"));
+        }
+        let page: PipelinePage = resp.json().await.context("parsing pipelines")?;
+        Ok(page.values)
+    }
+
+    /// Branches for a repo, sorted by most-recently-committed-to first.
+    pub async fn list_branches(
+        &self,
+        workspace: &str,
+        repo: &str,
+        per_page: u32,
+    ) -> Result<Vec<BranchRef>> {
+        let url = format!("{BASE}/repositories/{workspace}/{repo}/refs/branches");
+        let resp = self
+            .http
+            .get(&url)
+            .header("Authorization", &self.auth_header)
+            .header("Accept", "application/json")
+            .query(&[
+                ("pagelen", per_page.to_string()),
+                ("sort", "-target.date".to_string()),
+            ])
+            .send()
+            .await
+            .context("bitbucket branches list failed")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            return Err(anyhow!("bitbucket branches {status}: {text}"));
+        }
+        let page: BranchRefPage = resp.json().await.context("parsing branches")?;
+        Ok(page.values)
     }
 }
 
@@ -419,6 +474,237 @@ pub struct AuthUser {
     pub username: Option<String>,
     #[serde(default)]
     pub account_id: Option<String>,
+}
+
+// ─── Pipelines ─────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct PipelinePage {
+    #[serde(default)]
+    values: Vec<Pipeline>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct Pipeline {
+    /// Pipeline UUID — used to build the bitbucket.org browser URL.
+    pub uuid: String,
+    /// Sequential build number within the repo (`build_number` field).
+    #[serde(default)]
+    pub build_number: i64,
+    /// State envelope — top-level shape is
+    /// `{ name: "COMPLETED"|"PENDING"|"IN_PROGRESS"|...,
+    ///    result: { name: "SUCCESSFUL"|"FAILED"|"STOPPED" } }`.
+    #[serde(default)]
+    pub state: Option<PipelineState>,
+    #[serde(default)]
+    pub created_on: Option<String>,
+    #[serde(default)]
+    pub duration_in_seconds: Option<i64>,
+    /// Target branch / commit info.
+    #[serde(default)]
+    pub target: Option<PipelineTarget>,
+    /// Trigger that fired the pipeline (push, schedule, manual).
+    #[serde(default)]
+    pub trigger: Option<PipelineTrigger>,
+    /// Creator (omits the "trigger" person on schedules).
+    #[serde(default)]
+    pub creator: Option<User>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct PipelineState {
+    /// `PENDING` / `IN_PROGRESS` / `COMPLETED` / `HALTED` / `STOPPED`.
+    #[serde(default)]
+    pub name: String,
+    /// Only set when name = COMPLETED.
+    #[serde(default)]
+    pub result: Option<PipelineStateResult>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct PipelineStateResult {
+    /// `SUCCESSFUL` / `FAILED` / `STOPPED` / `ERROR`.
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct PipelineTarget {
+    /// `branch` is the usual ref name; `commit` would be set on
+    /// commit-targeted pipelines, but Bitbucket sends `ref_name`
+    /// for branches consistently.
+    #[serde(default)]
+    pub ref_name: Option<String>,
+    /// Commit hash (`{ hash: "<sha>" }`).
+    #[serde(default)]
+    pub commit: Option<CommitRef>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct PipelineTrigger {
+    /// `push` / `schedule` / `manual` / etc.
+    #[serde(default)]
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct CommitRef {
+    #[serde(default)]
+    pub hash: String,
+}
+
+impl Pipeline {
+    pub fn state_label(&self) -> String {
+        match self.state.as_ref() {
+            Some(s) if !s.name.is_empty() => {
+                if let Some(r) = s.result.as_ref()
+                    && !r.name.is_empty()
+                {
+                    return r.name.clone();
+                }
+                s.name.clone()
+            }
+            _ => "UNKNOWN".to_string(),
+        }
+    }
+
+    pub fn branch_label(&self) -> String {
+        self.target
+            .as_ref()
+            .and_then(|t| t.ref_name.clone())
+            .unwrap_or_else(|| "—".to_string())
+    }
+
+    pub fn short_sha(&self) -> String {
+        self.target
+            .as_ref()
+            .and_then(|t| t.commit.as_ref().map(|c| c.hash.clone()))
+            .map(|h| h.chars().take(7).collect::<String>())
+            .unwrap_or_default()
+    }
+
+    pub fn trigger_label(&self) -> String {
+        self.trigger
+            .as_ref()
+            .map(|t| t.name.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "—".into())
+    }
+
+    pub fn duration_label(&self) -> String {
+        match self.duration_in_seconds {
+            Some(s) if s > 0 => {
+                let m = s / 60;
+                let r = s % 60;
+                if m > 0 {
+                    format!("{m}m{r:02}s")
+                } else {
+                    format!("{r}s")
+                }
+            }
+            _ => "—".into(),
+        }
+    }
+
+    pub fn created_date(&self) -> String {
+        self.created_on
+            .as_deref()
+            .map(|s| s.chars().take(10).collect::<String>())
+            .unwrap_or_default()
+    }
+}
+
+// ─── Branches ──────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct BranchRefPage {
+    #[serde(default)]
+    values: Vec<BranchRef>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
+pub struct BranchRef {
+    pub name: String,
+    /// Latest commit on this branch — Bitbucket nests `hash`, `date`,
+    /// `author`, `message`. We use date + short hash + summary.
+    #[serde(default)]
+    pub target: Option<BranchTarget>,
+    #[serde(default)]
+    pub links: Option<Links>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct BranchTarget {
+    #[serde(default)]
+    pub hash: String,
+    #[serde(default)]
+    pub date: Option<String>,
+    #[serde(default)]
+    pub message: Option<String>,
+    #[serde(default)]
+    pub author: Option<BranchAuthor>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+#[allow(dead_code)]
+pub struct BranchAuthor {
+    /// On branch targets Bitbucket sends `raw` ("Name <email>") rather
+    /// than a User object.
+    #[serde(default)]
+    pub raw: String,
+    /// Sometimes the resolved User is also attached.
+    #[serde(default)]
+    pub user: Option<User>,
+}
+
+impl BranchRef {
+    pub fn short_sha(&self) -> String {
+        self.target
+            .as_ref()
+            .map(|t| t.hash.chars().take(7).collect::<String>())
+            .unwrap_or_default()
+    }
+
+    pub fn latest_date(&self) -> String {
+        self.target
+            .as_ref()
+            .and_then(|t| t.date.as_deref())
+            .map(|s| s.chars().take(10).collect::<String>())
+            .unwrap_or_default()
+    }
+
+    pub fn author_label(&self) -> String {
+        let Some(t) = self.target.as_ref() else {
+            return "—".into();
+        };
+        if let Some(u) = t.author.as_ref().and_then(|a| a.user.as_ref())
+            && !u.display_name.is_empty()
+        {
+            return u.display_name.clone();
+        }
+        let raw = t.author.as_ref().map(|a| a.raw.as_str()).unwrap_or("");
+        if raw.is_empty() {
+            return "—".into();
+        }
+        // Strip "Name <email>" down to "Name".
+        raw.split('<').next().unwrap_or(raw).trim().to_string()
+    }
+
+    pub fn summary_line(&self) -> String {
+        self.target
+            .as_ref()
+            .and_then(|t| t.message.as_deref())
+            .map(|m| m.lines().next().unwrap_or("").trim().to_string())
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]

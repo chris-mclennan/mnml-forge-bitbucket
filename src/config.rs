@@ -31,37 +31,49 @@ fn default_refresh() -> u64 {
 pub struct Tab {
     /// Human label shown in the tab strip.
     pub name: String,
+    /// What kind of view this tab shows. `pull_requests` (default),
+    /// `pipelines`, or `branches`. PR-specific fields (`state`,
+    /// `mode`, `q`) are ignored for `pipelines` / `branches`.
+    #[serde(default = "default_kind")]
+    pub kind: String,
     /// Override the default workspace for this tab.
     #[serde(default)]
     pub workspace: Option<String>,
-    /// Repository slug (the part after `<workspace>/`). Required
-    /// for the default `repo` mode; ignored by `mode = "mine"` and
-    /// `mode = "reviewing"` (which span the whole workspace).
+    /// Repository slug (the part after `<workspace>/`). Required for
+    /// per-repo PR tabs and for ALL `pipelines` / `branches` tabs
+    /// (those endpoints don't have a workspace-spanning variant).
+    /// Ignored by `pull_requests` with `mode = "mine"` /
+    /// `mode = "reviewing"` (those span the workspace).
     #[serde(default)]
     pub repo: Option<String>,
     /// PR state filter — `OPEN` (default), `MERGED`, `DECLINED`,
-    /// `SUPERSEDED`.
+    /// `SUPERSEDED`. Ignored when `kind != "pull_requests"`.
     #[serde(default = "default_state")]
     pub state: String,
-    /// Optional mode for cross-repo tabs:
+    /// Optional mode for cross-repo PR tabs:
     ///   - omitted ⇒ literal per-repo lookup (needs `repo`)
     ///   - `mine` ⇒ PRs you opened, across the workspace
     ///   - `reviewing` ⇒ PRs where you are a reviewer
     ///
     /// Both auto-modes use Bitbucket's `q=` BBQL via the workspace
     /// PR endpoint and resolve the current user's `account_id` at
-    /// load time via `/2.0/user`.
+    /// load time via `/2.0/user`. Ignored when `kind != "pull_requests"`.
     #[serde(default)]
     pub mode: Option<String>,
     /// Optional raw BBQL appended to the auto-mode query (or used
     /// as the only filter when `mode` and `repo` are both unset).
     /// Example: `state = "OPEN" AND author.account_id = "{abc}"`.
+    /// Ignored when `kind != "pull_requests"`.
     #[serde(default)]
     pub q: Option<String>,
 }
 
 fn default_state() -> String {
     "OPEN".to_string()
+}
+
+fn default_kind() -> String {
+    "pull_requests".to_string()
 }
 
 impl Config {
@@ -79,13 +91,15 @@ refresh_interval_secs = 60
 
 # ── Tabs ─────────────────────────────────────────────────────────
 # Each `[[tabs]]` entry is one tab. Switched via 1-9 (or click) and
-# rendered left→right. Three shapes:
+# rendered left→right.
 #
-#   1. Repo-scoped — `repo = "..."` (workspace falls back to default)
-#   2. `mode = "mine"` — PRs you opened across the default workspace
-#   3. `mode = "reviewing"` — PRs you're a reviewer on
+# `kind` defaults to `pull_requests`. Supported kinds:
+#   pull_requests — PR list with `state`, `mode = mine|reviewing`, BBQL `q`
+#   pipelines     — recent builds for a single `repo`
+#   branches      — branches in a single `repo`, sorted by latest commit
 #
-# `state` defaults to OPEN. Other values: MERGED / DECLINED / SUPERSEDED.
+# PR-specific fields (`state`, `mode`, `q`) are ignored on
+# `pipelines` / `branches` tabs.
 
 [[tabs]]
 name = "Mine"
@@ -99,6 +113,16 @@ mode = "reviewing"
 name = "your-repo PRs"
 repo = "your-repo"
 state = "OPEN"
+
+[[tabs]]
+name = "your-repo pipelines"
+kind = "pipelines"
+repo = "your-repo"
+
+[[tabs]]
+name = "your-repo branches"
+kind = "branches"
+repo = "your-repo"
 
 # [[tabs]]
 # name = "Recently merged"
@@ -117,29 +141,51 @@ state = "OPEN"
             return Err(anyhow!("config: at least one [[tabs]] entry required"));
         }
         for (i, t) in self.tabs.iter().enumerate() {
-            let valid_state = matches!(
-                t.state.as_str(),
-                "OPEN" | "MERGED" | "DECLINED" | "SUPERSEDED"
-            );
-            if !valid_state {
+            let valid_kind = matches!(t.kind.as_str(), "pull_requests" | "pipelines" | "branches");
+            if !valid_kind {
                 return Err(anyhow!(
-                    "tab #{i} ({}): state must be OPEN / MERGED / DECLINED / SUPERSEDED, got `{}`",
+                    "tab #{i} ({}): kind must be pull_requests / pipelines / branches, got `{}`",
                     t.name,
-                    t.state
+                    t.kind
                 ));
             }
-            if let Some(mode) = &t.mode {
-                if mode != "mine" && mode != "reviewing" {
-                    return Err(anyhow!(
-                        "tab #{i} ({}): mode must be `mine` or `reviewing`, got `{mode}`",
-                        t.name
-                    ));
+            match t.kind.as_str() {
+                "pull_requests" => {
+                    let valid_state = matches!(
+                        t.state.as_str(),
+                        "OPEN" | "MERGED" | "DECLINED" | "SUPERSEDED"
+                    );
+                    if !valid_state {
+                        return Err(anyhow!(
+                            "tab #{i} ({}): state must be OPEN / MERGED / DECLINED / SUPERSEDED, got `{}`",
+                            t.name,
+                            t.state
+                        ));
+                    }
+                    if let Some(mode) = &t.mode {
+                        if mode != "mine" && mode != "reviewing" {
+                            return Err(anyhow!(
+                                "tab #{i} ({}): mode must be `mine` or `reviewing`, got `{mode}`",
+                                t.name
+                            ));
+                        }
+                    } else if t.repo.is_none() && t.q.is_none() {
+                        return Err(anyhow!(
+                            "tab #{i} ({}): one of `mode`, `repo`, or `q` is required for `pull_requests`",
+                            t.name
+                        ));
+                    }
                 }
-            } else if t.repo.is_none() && t.q.is_none() {
-                return Err(anyhow!(
-                    "tab #{i} ({}): one of `mode`, `repo`, or `q` is required",
-                    t.name
-                ));
+                "pipelines" | "branches" => {
+                    if t.repo.is_none() {
+                        return Err(anyhow!(
+                            "tab #{i} ({}): `repo` is required for kind `{}`",
+                            t.name,
+                            t.kind
+                        ));
+                    }
+                }
+                _ => unreachable!("kind validity already checked above"),
             }
         }
         Ok(())
@@ -224,6 +270,49 @@ state = "PENDING"
 "##;
         let cfg: Config = toml::from_str(raw).unwrap();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn validate_accepts_pipelines_kind_with_repo() {
+        let raw = r##"
+email = "a@b.com"
+workspace = "ws"
+[[tabs]]
+name = "Pipelines"
+kind = "pipelines"
+repo = "myrepo"
+"##;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_pipelines_without_repo() {
+        let raw = r##"
+email = "a@b.com"
+workspace = "ws"
+[[tabs]]
+name = "Pipelines"
+kind = "pipelines"
+"##;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("repo"));
+    }
+
+    #[test]
+    fn validate_rejects_unknown_kind() {
+        let raw = r##"
+email = "a@b.com"
+workspace = "ws"
+[[tabs]]
+name = "Bad"
+kind = "garbage"
+repo = "myrepo"
+"##;
+        let cfg: Config = toml::from_str(raw).unwrap();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("pull_requests"));
     }
 
     #[test]

@@ -1,10 +1,69 @@
 //! App state — what's loaded, what's selected, the configured query
 //! for each tab.
 
-use crate::bitbucket::{Client, Comment, PullRequest};
+use crate::bitbucket::{BranchRef, Client, Comment, Pipeline, PullRequest};
 use crate::config::{Config, Tab};
 use anyhow::Result;
 use std::collections::HashMap;
+
+/// Per-tab content kind. The PR / Pipeline / Branch dispatch lives on
+/// `TabKind` rather than a bare string so the refresh + render paths
+/// can exhaustively match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabKind {
+    PullRequests,
+    Pipelines,
+    Branches,
+}
+
+impl TabKind {
+    pub fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "pull_requests" => Ok(Self::PullRequests),
+            "pipelines" => Ok(Self::Pipelines),
+            "branches" => Ok(Self::Branches),
+            other => Err(anyhow::anyhow!("unknown tab kind: {other}")),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PullRequests => "pull_requests",
+            Self::Pipelines => "pipelines",
+            Self::Branches => "branches",
+        }
+    }
+}
+
+/// Loaded data for a tab — variant determined by the resolved `TabKind`.
+#[derive(Debug, Clone)]
+pub enum TabData {
+    PullRequests(Vec<PullRequest>),
+    Pipelines(Vec<Pipeline>),
+    Branches(Vec<BranchRef>),
+}
+
+impl TabData {
+    pub fn empty_for(kind: TabKind) -> Self {
+        match kind {
+            TabKind::PullRequests => Self::PullRequests(Vec::new()),
+            TabKind::Pipelines => Self::Pipelines(Vec::new()),
+            TabKind::Branches => Self::Branches(Vec::new()),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            Self::PullRequests(v) => v.len(),
+            Self::Pipelines(v) => v.len(),
+            Self::Branches(v) => v.len(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
 
 pub struct App {
     pub cfg: Config,
@@ -17,6 +76,8 @@ pub struct App {
     pub active_tab: usize,
     pub status: String,
     /// Right-half detail panel visibility (toggled with `d`).
+    /// Only meaningful on `PullRequests` tabs in v0.3 — other kinds
+    /// render a brief "no detail panel for this view" message.
     pub details_visible: bool,
     /// First-line offset into the detail body (`Ctrl+U/D` scroll).
     pub details_scroll: u16,
@@ -42,7 +103,7 @@ pub struct TabState {
     /// Resolved per-tab fetch spec, captured at App::new from the
     /// config so the refresh path doesn't have to re-resolve.
     pub spec: TabSpec,
-    pub prs: Vec<PullRequest>,
+    pub data: TabData,
     pub selected: usize,
     pub last_fetched: Option<std::time::Instant>,
     pub last_error: Option<String>,
@@ -51,11 +112,15 @@ pub struct TabState {
 /// Resolved tab fetch spec — what to send to the bitbucket client.
 #[derive(Debug, Clone)]
 pub struct TabSpec {
+    pub kind: TabKind,
     pub workspace: String,
     /// `None` ⇒ workspace-level lookup (PRs across all repos in the
     /// workspace, scoped by `q`). `Some(repo)` ⇒ single-repo lookup.
+    /// Pipelines + Branches require Some(repo).
     pub repo: Option<String>,
+    /// PR state — only meaningful for `kind = PullRequests`.
     pub state: String,
+    /// BBQL — only meaningful for `kind = PullRequests`.
     pub q: Option<String>,
 }
 
@@ -63,60 +128,84 @@ impl TabSpec {
     /// Resolve a `Tab` config entry against the global default
     /// workspace + the resolved current-user account_id (for `mine`
     /// / `reviewing`). `me_account_id` of `None` is allowed but causes
-    /// auto-mode tabs to emit an explanatory error rather than firing
-    /// a malformed query.
+    /// auto-mode PR tabs to emit an explanatory error rather than
+    /// firing a malformed query.
     pub fn resolve(
         tab: &Tab,
         default_workspace: &str,
         me_account_id: Option<&str>,
     ) -> Result<Self> {
+        let kind = TabKind::from_str(&tab.kind)?;
         let workspace = tab
             .workspace
             .clone()
             .unwrap_or_else(|| default_workspace.to_string());
-        let (repo, q) = match tab.mode.as_deref() {
-            Some("mine") => {
-                let aid = me_account_id.ok_or_else(|| {
-                    anyhow::anyhow!("mode=\"mine\" needs Account:Read scope on the app password")
-                })?;
-                let auto = format!("author.account_id = \"{aid}\"");
-                let combined = match &tab.q {
-                    Some(extra) if !extra.trim().is_empty() => format!("{auto} AND {extra}"),
-                    _ => auto,
+        match kind {
+            TabKind::PullRequests => {
+                let (repo, q) = match tab.mode.as_deref() {
+                    Some("mine") => {
+                        let aid = me_account_id.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "mode=\"mine\" needs Account:Read scope on the app password"
+                            )
+                        })?;
+                        let auto = format!("author.account_id = \"{aid}\"");
+                        let combined = match &tab.q {
+                            Some(extra) if !extra.trim().is_empty() => {
+                                format!("{auto} AND {extra}")
+                            }
+                            _ => auto,
+                        };
+                        (None, Some(combined))
+                    }
+                    Some("reviewing") => {
+                        let aid = me_account_id.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "mode=\"reviewing\" needs Account:Read scope on the app password"
+                            )
+                        })?;
+                        let auto = format!("reviewers.account_id = \"{aid}\"");
+                        let combined = match &tab.q {
+                            Some(extra) if !extra.trim().is_empty() => {
+                                format!("{auto} AND {extra}")
+                            }
+                            _ => auto,
+                        };
+                        (None, Some(combined))
+                    }
+                    None => (tab.repo.clone(), tab.q.clone()),
+                    Some(other) => {
+                        return Err(anyhow::anyhow!("unknown tab mode: {other}"));
+                    }
                 };
-                (None, Some(combined))
+                Ok(TabSpec {
+                    kind,
+                    workspace,
+                    repo,
+                    state: tab.state.clone(),
+                    q,
+                })
             }
-            Some("reviewing") => {
-                let aid = me_account_id.ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "mode=\"reviewing\" needs Account:Read scope on the app password"
-                    )
+            TabKind::Pipelines | TabKind::Branches => {
+                let repo = tab.repo.clone().ok_or_else(|| {
+                    anyhow::anyhow!("kind = `{}` requires a `repo` field", kind.as_str())
                 })?;
-                let auto = format!("reviewers.account_id = \"{aid}\"");
-                let combined = match &tab.q {
-                    Some(extra) if !extra.trim().is_empty() => format!("{auto} AND {extra}"),
-                    _ => auto,
-                };
-                (None, Some(combined))
+                Ok(TabSpec {
+                    kind,
+                    workspace,
+                    repo: Some(repo),
+                    state: String::new(),
+                    q: None,
+                })
             }
-            None => (tab.repo.clone(), tab.q.clone()),
-            Some(other) => {
-                return Err(anyhow::anyhow!("unknown tab mode: {other}"));
-            }
-        };
-        Ok(TabSpec {
-            workspace,
-            repo,
-            state: tab.state.clone(),
-            q,
-        })
+        }
     }
 }
 
 impl App {
     pub async fn new(cfg: Config, client: Client) -> Result<Self> {
         // Resolve current-user account_id once. Failure is non-fatal
-        // — non-auto tabs still work; auto-mode tabs surface the
+        // — non-auto tabs still work; auto-mode PR tabs surface the
         // error on their first refresh.
         let (me_account_id, whoami_err) = match client.whoami().await {
             Ok(u) => (u.account_id, None),
@@ -124,36 +213,31 @@ impl App {
         };
         let mut tabs = Vec::with_capacity(cfg.tabs.len());
         for t in &cfg.tabs {
-            let spec = match TabSpec::resolve(t, &cfg.workspace, me_account_id.as_deref()) {
-                Ok(s) => s,
-                Err(e) => {
-                    // Park the bad tab with a static error and an
-                    // empty spec — switch_tab will still land on it,
-                    // refresh will short-circuit on last_error.
-                    tabs.push(TabState {
-                        name: t.name.clone(),
-                        spec: TabSpec {
-                            workspace: cfg.workspace.clone(),
-                            repo: None,
-                            state: t.state.clone(),
-                            q: None,
-                        },
-                        prs: Vec::new(),
-                        selected: 0,
-                        last_fetched: None,
-                        last_error: Some(e.to_string()),
-                    });
-                    continue;
-                }
-            };
-            tabs.push(TabState {
-                name: t.name.clone(),
-                spec,
-                prs: Vec::new(),
-                selected: 0,
-                last_fetched: None,
-                last_error: None,
-            });
+            let parsed_kind = TabKind::from_str(&t.kind).unwrap_or(TabKind::PullRequests);
+            match TabSpec::resolve(t, &cfg.workspace, me_account_id.as_deref()) {
+                Ok(spec) => tabs.push(TabState {
+                    name: t.name.clone(),
+                    data: TabData::empty_for(spec.kind),
+                    spec,
+                    selected: 0,
+                    last_fetched: None,
+                    last_error: None,
+                }),
+                Err(e) => tabs.push(TabState {
+                    name: t.name.clone(),
+                    spec: TabSpec {
+                        kind: parsed_kind,
+                        workspace: cfg.workspace.clone(),
+                        repo: None,
+                        state: t.state.clone(),
+                        q: None,
+                    },
+                    data: TabData::empty_for(parsed_kind),
+                    selected: 0,
+                    last_fetched: None,
+                    last_error: Some(e.to_string()),
+                }),
+            }
         }
         let status = whoami_err
             .as_deref()
@@ -175,23 +259,179 @@ impl App {
         Ok(app)
     }
 
+    pub fn active(&self) -> &TabState {
+        &self.tabs[self.active_tab]
+    }
+    pub fn active_mut(&mut self) -> &mut TabState {
+        &mut self.tabs[self.active_tab]
+    }
+
+    pub fn switch_tab(&mut self, idx: usize) {
+        if idx < self.tabs.len() {
+            self.active_tab = idx;
+            if self.tabs[idx].last_fetched.is_none() {
+                self.status = format!("loading {}…", self.tabs[idx].name);
+            }
+        }
+    }
+
+    pub fn move_selection(&mut self, delta: isize) {
+        let len = self.active().data.len();
+        if len == 0 {
+            return;
+        }
+        let s = self.active().selected as isize + delta;
+        let new = s.clamp(0, len as isize - 1) as usize;
+        self.active_mut().selected = new;
+    }
+
     /// `(workspace, repo, id)` of the focused PR, or `None` if the
-    /// active tab has no PRs. Used as the cache key for the detail
-    /// panel.
+    /// active tab isn't a PR tab or has no rows. Used as the detail
+    /// cache key.
     pub fn focused_key(&self) -> Option<(String, String, i64)> {
         let tab = self.active();
-        let pr = tab.prs.get(tab.selected)?;
-        // Bitbucket's `repo_short` returns "workspace/repo"; we split
-        // here rather than building a separate accessor since this is
-        // the only place we need the parts.
+        let TabData::PullRequests(prs) = &tab.data else {
+            return None;
+        };
+        let pr = prs.get(tab.selected)?;
         let full = pr.repo_short();
         let (workspace, repo) = full.split_once('/').unwrap_or(("", full.as_str()));
         Some((workspace.to_string(), repo.to_string(), pr.id))
     }
 
+    pub async fn refresh_active(&mut self) {
+        let idx = self.active_tab;
+        // Bail out for pre-failed tabs (resolution error in App::new).
+        if self.tabs[idx].last_error.is_some() && self.tabs[idx].data.is_empty() {
+            self.status = format!(
+                "{}: {}",
+                self.tabs[idx].name,
+                self.tabs[idx].last_error.as_deref().unwrap_or("")
+            );
+            return;
+        }
+        let spec = self.tabs[idx].spec.clone();
+        let name = self.tabs[idx].name.clone();
+        self.status = format!("refreshing {name}…");
+        match spec.kind {
+            TabKind::PullRequests => {
+                let result = self
+                    .client
+                    .list_repo_prs(
+                        &spec.workspace,
+                        spec.repo.as_deref().unwrap_or(""),
+                        Some(&spec.state),
+                        spec.q.as_deref(),
+                        50,
+                    )
+                    .await;
+                self.commit_pr_refresh(idx, name, result);
+            }
+            TabKind::Pipelines => {
+                let repo = spec.repo.as_deref().unwrap_or("");
+                let result = self.client.list_pipelines(&spec.workspace, repo, 50).await;
+                self.commit_pipeline_refresh(idx, name, result);
+            }
+            TabKind::Branches => {
+                let repo = spec.repo.as_deref().unwrap_or("");
+                let result = self.client.list_branches(&spec.workspace, repo, 50).await;
+                self.commit_branch_refresh(idx, name, result);
+            }
+        }
+    }
+
+    fn commit_pr_refresh(&mut self, idx: usize, name: String, result: Result<Vec<PullRequest>>) {
+        match result {
+            Ok(prs) => {
+                let n = prs.len();
+                self.tabs[idx].data = TabData::PullRequests(prs);
+                self.tabs[idx].last_fetched = Some(std::time::Instant::now());
+                self.tabs[idx].last_error = None;
+                self.tabs[idx].selected = self.tabs[idx].selected.min(n.saturating_sub(1));
+                self.status = format!("{name} · {n} PRs");
+            }
+            Err(e) => {
+                self.tabs[idx].last_error = Some(e.to_string());
+                self.status = format!("error: {e}");
+            }
+        }
+    }
+
+    fn commit_pipeline_refresh(&mut self, idx: usize, name: String, result: Result<Vec<Pipeline>>) {
+        match result {
+            Ok(ps) => {
+                let n = ps.len();
+                self.tabs[idx].data = TabData::Pipelines(ps);
+                self.tabs[idx].last_fetched = Some(std::time::Instant::now());
+                self.tabs[idx].last_error = None;
+                self.tabs[idx].selected = self.tabs[idx].selected.min(n.saturating_sub(1));
+                self.status = format!("{name} · {n} pipelines");
+            }
+            Err(e) => {
+                self.tabs[idx].last_error = Some(e.to_string());
+                self.status = format!("error: {e}");
+            }
+        }
+    }
+
+    fn commit_branch_refresh(&mut self, idx: usize, name: String, result: Result<Vec<BranchRef>>) {
+        match result {
+            Ok(bs) => {
+                let n = bs.len();
+                self.tabs[idx].data = TabData::Branches(bs);
+                self.tabs[idx].last_fetched = Some(std::time::Instant::now());
+                self.tabs[idx].last_error = None;
+                self.tabs[idx].selected = self.tabs[idx].selected.min(n.saturating_sub(1));
+                self.status = format!("{name} · {n} branches");
+            }
+            Err(e) => {
+                self.tabs[idx].last_error = Some(e.to_string());
+                self.status = format!("error: {e}");
+            }
+        }
+    }
+
+    /// Open whatever the focused row points at in the browser.
+    /// Per-kind URL strategy:
+    ///   - PR: `pr.html_url()` (Bitbucket sends one in `links.html`)
+    ///   - Pipeline: bitbucket.org/<ws>/<repo>/pipelines/results/<n>
+    ///   - Branch: bitbucket.org/<ws>/<repo>/branch/<name>
+    pub fn open_focused(&mut self) {
+        let tab = self.active();
+        let workspace = tab.spec.workspace.clone();
+        let repo = tab.spec.repo.clone().unwrap_or_default();
+        let url = match &tab.data {
+            TabData::PullRequests(prs) => match prs.get(tab.selected) {
+                Some(p) => p.html_url(),
+                None => return,
+            },
+            TabData::Pipelines(ps) => ps.get(tab.selected).map(|p| {
+                format!(
+                    "https://bitbucket.org/{workspace}/{repo}/pipelines/results/{}",
+                    p.build_number
+                )
+            }),
+            TabData::Branches(bs) => bs
+                .get(tab.selected)
+                .map(|b| format!("https://bitbucket.org/{workspace}/{repo}/branch/{}", b.name)),
+        };
+        let Some(url) = url else {
+            self.status = "no URL for this row".to_string();
+            return;
+        };
+        match webbrowser::open(&url) {
+            Ok(()) => self.status = format!("opened {url}"),
+            Err(e) => self.status = format!("open failed: {e}"),
+        }
+    }
+
     /// Toggle the right-half detail panel. Opening lazily fetches the
-    /// detail; closing keeps the cache around.
+    /// detail; closing keeps the cache around. No-op on non-PR tabs.
     pub async fn toggle_details(&mut self) {
+        if self.active().spec.kind != TabKind::PullRequests {
+            self.status = "detail panel is PR-only in v0.3".to_string();
+            return;
+        }
         self.details_visible = !self.details_visible;
         self.details_scroll = 0;
         if self.details_visible {
@@ -199,8 +439,6 @@ impl App {
         }
     }
 
-    /// Fetch the detail for the focused PR if not cached and not
-    /// in-flight. No-op on tabs with empty PR lists.
     pub async fn ensure_focused_detail(&mut self) {
         let Some(key) = self.focused_key() else {
             return;
@@ -223,17 +461,12 @@ impl App {
         }
     }
 
-    /// Drop the cached detail for the focused PR so the next focus
-    /// re-fetches. Triggered by `r` while the panel is open.
     pub fn invalidate_focused_detail(&mut self) {
         if let Some(key) = self.focused_key() {
             self.detail_cache.remove(&key);
         }
     }
 
-    /// Approve or unapprove the focused PR, based on the current
-    /// state of the cached detail. No-op if the panel isn't open or
-    /// we don't have an `account_id` to compare against.
     pub async fn toggle_approval(&mut self) {
         let Some(key) = self.focused_key() else {
             return;
@@ -260,8 +493,6 @@ impl App {
                 } else {
                     format!("approved {ws}/{repo}#{id}")
                 };
-                // Drop the cached detail so a fresh fetch picks up
-                // the updated participant record + approval count.
                 self.detail_cache.remove(&key);
                 self.ensure_focused_detail().await;
             }
@@ -281,113 +512,6 @@ impl App {
             self.details_scroll = self.details_scroll.saturating_sub((-delta) as u16);
         }
     }
-
-    pub fn active(&self) -> &TabState {
-        &self.tabs[self.active_tab]
-    }
-    pub fn active_mut(&mut self) -> &mut TabState {
-        &mut self.tabs[self.active_tab]
-    }
-
-    pub fn switch_tab(&mut self, idx: usize) {
-        if idx < self.tabs.len() {
-            self.active_tab = idx;
-            if self.tabs[idx].last_fetched.is_none() {
-                self.status = format!("loading {}…", self.tabs[idx].name);
-            }
-        }
-    }
-
-    pub fn move_selection(&mut self, delta: isize) {
-        let len = self.active().prs.len();
-        if len == 0 {
-            return;
-        }
-        let s = self.active().selected as isize + delta;
-        let new = s.clamp(0, len as isize - 1) as usize;
-        self.active_mut().selected = new;
-    }
-
-    pub async fn refresh_active(&mut self) {
-        let idx = self.active_tab;
-        // Bail out for pre-failed tabs (resolution error in App::new).
-        if self.tabs[idx].last_error.is_some() && self.tabs[idx].prs.is_empty() {
-            self.status = format!(
-                "{}: {}",
-                self.tabs[idx].name,
-                self.tabs[idx].last_error.as_deref().unwrap_or("")
-            );
-            return;
-        }
-        let spec = self.tabs[idx].spec.clone();
-        let name = self.tabs[idx].name.clone();
-        self.status = format!("refreshing {name}…");
-        let result = if let Some(repo) = spec.repo.as_deref() {
-            self.client
-                .list_repo_prs(
-                    &spec.workspace,
-                    repo,
-                    Some(&spec.state),
-                    spec.q.as_deref(),
-                    50,
-                )
-                .await
-        } else {
-            // Workspace-level — pick *any* repo's pullrequests endpoint
-            // by spanning the workspace via the `/repositories/<ws>`
-            // search isn't directly exposed; instead we issue against
-            // a wildcard repo using BBQL's `state` + `author.account_id`
-            // / `reviewers.account_id` clauses. Bitbucket exposes this
-            // via `/2.0/pullrequests/{selected_user}` for `mine`, but
-            // that surface is being deprecated — using per-workspace
-            // BBQL keeps both auto-modes uniform.
-            //
-            // For v0.1 we issue against the default workspace's
-            // `/pullrequests` index repo-by-repo only when a repo is
-            // set. Without a repo, surface a clear error rather than
-            // an empty list.
-            self.client
-                .list_repo_prs(
-                    &spec.workspace,
-                    "",
-                    Some(&spec.state),
-                    spec.q.as_deref(),
-                    50,
-                )
-                .await
-        };
-        match result {
-            Ok(prs) => {
-                self.tabs[idx].prs = prs;
-                self.tabs[idx].last_fetched = Some(std::time::Instant::now());
-                self.tabs[idx].last_error = None;
-                self.tabs[idx].selected = self.tabs[idx]
-                    .selected
-                    .min(self.tabs[idx].prs.len().saturating_sub(1));
-                self.status = format!("{} · {} PRs", name, self.tabs[idx].prs.len());
-            }
-            Err(e) => {
-                self.tabs[idx].last_error = Some(e.to_string());
-                self.status = format!("error: {e}");
-            }
-        }
-    }
-
-    pub fn open_focused(&mut self) {
-        let pr = match self.active().prs.get(self.active().selected) {
-            Some(p) => p.clone(),
-            None => return,
-        };
-        let Some(url) = pr.html_url() else {
-            self.status = "no html URL on this PR".to_string();
-            return;
-        };
-        let badge = format!("{}#{}", pr.repo_short(), pr.id);
-        match webbrowser::open(&url) {
-            Ok(()) => self.status = format!("opened {} in browser", badge),
-            Err(e) => self.status = format!("open failed: {e}"),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -398,6 +522,7 @@ mod tests {
     fn t(name: &str) -> Tab {
         Tab {
             name: name.into(),
+            kind: "pull_requests".into(),
             workspace: None,
             repo: None,
             state: "OPEN".into(),
@@ -411,6 +536,7 @@ mod tests {
         let mut tab = t("repo");
         tab.repo = Some("tattle-api".into());
         let spec = TabSpec::resolve(&tab, "tattlecorp", None).unwrap();
+        assert_eq!(spec.kind, TabKind::PullRequests);
         assert_eq!(spec.workspace, "tattlecorp");
         assert_eq!(spec.repo.as_deref(), Some("tattle-api"));
         assert_eq!(spec.state, "OPEN");
@@ -460,5 +586,39 @@ mod tests {
         let spec = TabSpec::resolve(&tab, "ws", Some("aid:abc")).unwrap();
         let q = spec.q.unwrap();
         assert!(q.contains(" AND "));
+    }
+
+    #[test]
+    fn resolve_pipelines_kind_requires_repo() {
+        let mut tab = t("p");
+        tab.kind = "pipelines".into();
+        let err = TabSpec::resolve(&tab, "ws", None).unwrap_err();
+        assert!(err.to_string().contains("repo"));
+    }
+
+    #[test]
+    fn resolve_pipelines_kind_with_repo_succeeds() {
+        let mut tab = t("p");
+        tab.kind = "pipelines".into();
+        tab.repo = Some("myrepo".into());
+        let spec = TabSpec::resolve(&tab, "ws", None).unwrap();
+        assert_eq!(spec.kind, TabKind::Pipelines);
+        assert_eq!(spec.repo.as_deref(), Some("myrepo"));
+    }
+
+    #[test]
+    fn resolve_branches_kind_requires_repo() {
+        let mut tab = t("b");
+        tab.kind = "branches".into();
+        let err = TabSpec::resolve(&tab, "ws", None).unwrap_err();
+        assert!(err.to_string().contains("repo"));
+    }
+
+    #[test]
+    fn resolve_unknown_kind_errors() {
+        let mut tab = t("bad");
+        tab.kind = "garbage".into();
+        let err = TabSpec::resolve(&tab, "ws", None).unwrap_err();
+        assert!(err.to_string().contains("garbage"));
     }
 }

@@ -239,7 +239,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
         .iter()
         .enumerate()
         .map(|(i, t)| {
-            let n = t.prs.len();
+            let n = t.data.len();
             let label = if t.last_fetched.is_some() {
                 format!("{}.{} ({n})", i + 1, t.name)
             } else {
@@ -249,11 +249,7 @@ fn draw_tabs(f: &mut Frame, area: Rect, app: &App) {
         })
         .collect();
     let tabs = Tabs::new(labels)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" bitbucket PRs "),
-        )
+        .block(Block::default().borders(Borders::ALL).title(" bitbucket "))
         .select(app.active_tab)
         .highlight_style(
             Style::default()
@@ -268,21 +264,58 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
     let tab = app.active();
     if let Some(err) = &tab.last_error {
         let p = Paragraph::new(format!("error: {err}\n\nPress `r` to retry."))
-            .style(Style::default().fg(Color::Red));
+            .style(Style::default().fg(Color::Red))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {} ", tab.name)),
+            );
         f.render_widget(p, area);
         return;
     }
-    if tab.prs.is_empty() && tab.last_fetched.is_some() {
-        let p =
-            Paragraph::new("(no PRs match this tab)").style(Style::default().fg(Color::DarkGray));
+    if tab.data.is_empty() && tab.last_fetched.is_some() {
+        let p = Paragraph::new(empty_message(tab.spec.kind))
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {} ", tab.name)),
+            );
         f.render_widget(p, area);
         return;
     }
-    if tab.prs.is_empty() {
-        let p = Paragraph::new("loading…").style(Style::default().fg(Color::DarkGray));
+    if tab.data.is_empty() {
+        let p = Paragraph::new("loading…")
+            .style(Style::default().fg(Color::DarkGray))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" {} ", tab.name)),
+            );
         f.render_widget(p, area);
         return;
     }
+    match &tab.data {
+        crate::app::TabData::PullRequests(prs) => draw_pr_table(f, area, tab, prs),
+        crate::app::TabData::Pipelines(ps) => draw_pipeline_table(f, area, tab, ps),
+        crate::app::TabData::Branches(bs) => draw_branch_table(f, area, tab, bs),
+    }
+}
+
+fn empty_message(kind: crate::app::TabKind) -> &'static str {
+    match kind {
+        crate::app::TabKind::PullRequests => "(no PRs match this tab)",
+        crate::app::TabKind::Pipelines => "(no pipelines have run on this repo)",
+        crate::app::TabKind::Branches => "(no branches in this repo)",
+    }
+}
+
+fn draw_pr_table(
+    f: &mut Frame,
+    area: Rect,
+    tab: &crate::app::TabState,
+    prs: &[crate::bitbucket::PullRequest],
+) {
     let header = Row::new(vec![
         Cell::from("REPO"),
         Cell::from("PR"),
@@ -297,8 +330,7 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
             .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),
     );
-    let rows: Vec<Row> = tab
-        .prs
+    let rows: Vec<Row> = prs
         .iter()
         .map(|p| {
             let repo = p.repo_short();
@@ -359,6 +391,135 @@ fn draw_table(f: &mut Frame, area: Rect, app: &App) {
     let mut state = TableState::default();
     state.select(Some(tab.selected));
     f.render_stateful_widget(table, area, &mut state);
+}
+
+fn draw_pipeline_table(
+    f: &mut Frame,
+    area: Rect,
+    tab: &crate::app::TabState,
+    ps: &[crate::bitbucket::Pipeline],
+) {
+    let header = Row::new(vec![
+        Cell::from("#"),
+        Cell::from("STATE"),
+        Cell::from("BRANCH"),
+        Cell::from("COMMIT"),
+        Cell::from("TRIGGER"),
+        Cell::from("DURATION"),
+        Cell::from("CREATED"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
+    let rows: Vec<Row> = ps
+        .iter()
+        .map(|p| {
+            let state = p.state_label();
+            let state_style = Style::default().fg(pipeline_state_color(&state));
+            Row::new(vec![
+                Cell::from(format!("#{}", p.build_number))
+                    .style(Style::default().fg(Color::Yellow)),
+                Cell::from(state).style(state_style),
+                Cell::from(p.branch_label()),
+                Cell::from(p.short_sha()),
+                Cell::from(p.trigger_label()),
+                Cell::from(p.duration_label()),
+                Cell::from(p.created_date()),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(8),
+        Constraint::Length(12),
+        Constraint::Length(24),
+        Constraint::Length(10),
+        Constraint::Length(12),
+        Constraint::Length(10),
+        Constraint::Length(12),
+    ];
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", tab.name)),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸ ");
+    let mut state = TableState::default();
+    state.select(Some(tab.selected));
+    f.render_stateful_widget(table, area, &mut state);
+}
+
+fn draw_branch_table(
+    f: &mut Frame,
+    area: Rect,
+    tab: &crate::app::TabState,
+    bs: &[crate::bitbucket::BranchRef],
+) {
+    let header = Row::new(vec![
+        Cell::from("BRANCH"),
+        Cell::from("COMMIT"),
+        Cell::from("LATEST"),
+        Cell::from("AUTHOR"),
+        Cell::from("MESSAGE"),
+    ])
+    .style(
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
+    let rows: Vec<Row> = bs
+        .iter()
+        .map(|b| {
+            Row::new(vec![
+                Cell::from(b.name.clone()),
+                Cell::from(b.short_sha()).style(Style::default().fg(Color::Yellow)),
+                Cell::from(b.latest_date()),
+                Cell::from(b.author_label()),
+                Cell::from(b.summary_line()),
+            ])
+        })
+        .collect();
+    let widths = [
+        Constraint::Length(32),
+        Constraint::Length(10),
+        Constraint::Length(12),
+        Constraint::Length(20),
+        Constraint::Min(20),
+    ];
+    let table = Table::new(rows, widths)
+        .header(header)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" {} ", tab.name)),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▸ ");
+    let mut state = TableState::default();
+    state.select(Some(tab.selected));
+    f.render_stateful_widget(table, area, &mut state);
+}
+
+fn pipeline_state_color(state: &str) -> Color {
+    match state {
+        "SUCCESSFUL" => Color::Green,
+        "FAILED" | "ERROR" => Color::Red,
+        "STOPPED" | "HALTED" => Color::DarkGray,
+        "IN_PROGRESS" | "PENDING" | "RUNNING" => Color::Yellow,
+        _ => Color::Gray,
+    }
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {

@@ -65,9 +65,37 @@ Homebrew tap + binary releases will follow once the binary stabilises.
 
    Hits `/2.0/user` to confirm the app password works.
 
-## Tab modes
+## Tab kinds
 
-Each `[[tabs]]` entry is one tab. Three shapes are supported:
+Each `[[tabs]]` entry is one tab. The `kind` field (defaults to `pull_requests`) decides what the tab shows:
+
+| `kind` | What it shows | Required fields |
+|---|---|---|
+| `pull_requests` (default) | PR list, with state filter + optional mine/reviewing modes | one of `repo` / `mode` / `q` |
+| `pipelines` | Recent builds for a repo, newest-first | `repo` |
+| `branches` | Branches in a repo, sorted by latest commit | `repo` |
+
+PR-specific fields (`state`, `mode`, `q`) are ignored on `pipelines` and `branches` tabs.
+
+```toml
+[[tabs]]
+name = "Reviewing"
+mode = "reviewing"          # kind defaults to pull_requests
+
+[[tabs]]
+name = "tattle-api pipelines"
+kind = "pipelines"
+repo = "tattle-api"
+
+[[tabs]]
+name = "tattle-api branches"
+kind = "branches"
+repo = "tattle-api"
+```
+
+### Pull-request tab shapes
+
+Three shapes for `kind = "pull_requests"`:
 
 ### Per-repo
 
@@ -225,15 +253,19 @@ replace.
 
 ## Status
 
-**v0.2** (current):
+**v0.3** (current):
 
 - Standalone + blit-host modes
-- Per-repo tabs with state filter (OPEN / MERGED / DECLINED / SUPERSEDED)
-- `mode = "mine"` / `mode = "reviewing"` auto-tabs (workspace-spanning BBQL)
-- Custom `q` BBQL for layered filters
-- 1-9 / Tab / Enter navigation · `r` refresh
+- **Three tab kinds**: `pull_requests` (default), `pipelines`, `branches`
+- PR tabs:
+  - Per-repo with state filter (OPEN / MERGED / DECLINED / SUPERSEDED)
+  - `mode = "mine"` / `mode = "reviewing"` auto-tabs (workspace-spanning BBQL)
+  - Custom `q` BBQL for layered filters
+- Pipeline tabs: build number / state / branch / commit / trigger / duration, newest-first
+- Branch tabs: name / sha / latest commit date / author / first-line commit message
+- 1-9 / Tab / Enter navigation · `r` refresh · `Enter`/`o` open in browser (kind-aware URL)
 - Auto-refresh on `refresh_interval_secs`
-- `d` right-half detail panel — header + description + last 20 comments, lazy-loaded + cached per PR
+- `d` right-half PR detail panel — header + description + last 20 comments, lazy-loaded + cached
 - `Ctrl+U` / `Ctrl+D` scroll the detail panel
 - `a` approve / unapprove toggle with `✓ you approved · N total` chip
 - `--check` for resolved-config + whoami verification
