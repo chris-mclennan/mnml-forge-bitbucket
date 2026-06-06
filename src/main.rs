@@ -3,6 +3,7 @@ mod auth;
 mod bitbucket;
 mod blit;
 mod config;
+mod headless;
 mod keys;
 mod ui;
 
@@ -25,6 +26,32 @@ struct Cli {
     /// a pane (`:host.launch mnml-forge-bitbucket`).
     #[arg(long, value_name = "SOCKET")]
     blit: Option<String>,
+    /// Headless: print every open PR the configured PR tabs would
+    /// surface, as JSON on stdout, then exit. Used by mnml's
+    /// `pr.picker` cross-host palette command and by the rail's
+    /// "Open PRs" subsection refresh. Requires `--json` (only
+    /// shape supported v1).
+    #[arg(long)]
+    list_prs: bool,
+    /// Headless: print the URL of the most recent pipeline run on
+    /// `--branch` in `--owner/--repo`, as `{"url": "..."}` JSON on
+    /// stdout. Used by mnml's pr.picker Tab → cross-nav. Returns
+    /// `{"url": null}` when no matching pipeline is found.
+    #[arg(long)]
+    find_pipeline_for_pr: bool,
+    /// Owner (workspace) for `--find-pipeline-for-pr`.
+    #[arg(long)]
+    owner: Option<String>,
+    /// Repo for `--find-pipeline-for-pr`.
+    #[arg(long)]
+    repo: Option<String>,
+    /// Source branch name for `--find-pipeline-for-pr`.
+    #[arg(long)]
+    branch: Option<String>,
+    /// Required for `--list-prs` / `--find-pipeline-for-pr`. Reserves
+    /// the headless surface for future shapes.
+    #[arg(long)]
+    json: bool,
 }
 
 #[tokio::main]
@@ -41,6 +68,32 @@ async fn main() -> Result<()> {
         )
     })?;
     let client = bitbucket::Client::new(&cfg.email, &token)?;
+
+    if cli.list_prs {
+        if !cli.json {
+            anyhow::bail!("--list-prs requires --json (only shape supported v1)");
+        }
+        return headless::list_prs(&cfg, &client).await;
+    }
+
+    if cli.find_pipeline_for_pr {
+        if !cli.json {
+            anyhow::bail!("--find-pipeline-for-pr requires --json");
+        }
+        let owner = cli
+            .owner
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--owner is required"))?;
+        let repo = cli
+            .repo
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--repo is required"))?;
+        let branch = cli
+            .branch
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--branch is required"))?;
+        return headless::find_pipeline_for_pr(&client, owner, repo, branch).await;
+    }
 
     if cli.check {
         println!("config: {}", config::config_path().display());
