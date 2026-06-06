@@ -13,6 +13,10 @@ pub enum Action {
     Home,
     End,
     OpenInBrowser,
+    /// `y` — copy the focused row's URL to the OS clipboard.
+    /// Restores the pre-split `bitbucket.copy_selected_pr_url`
+    /// / `bitbucket.copy_selected_url` palette commands.
+    YankUrl,
     SwitchTab(usize),
     NextTab,
     PrevTab,
@@ -41,6 +45,7 @@ pub fn handle(key: KeyEvent, _app: &App) -> Option<Action> {
         KeyCode::Home | KeyCode::Char('g') => Some(Action::Home),
         KeyCode::End | KeyCode::Char('G') => Some(Action::End),
         KeyCode::Enter | KeyCode::Char('o') => Some(Action::OpenInBrowser),
+        KeyCode::Char('y') => Some(Action::YankUrl),
         KeyCode::Tab => Some(Action::NextTab),
         KeyCode::BackTab => Some(Action::PrevTab),
         // `d` (no modifiers) toggles the right-half detail panel.
@@ -76,6 +81,7 @@ pub async fn apply(action: Action, app: &mut App) -> bool {
         Action::Home => app.move_selection(-(i32::MAX as isize)),
         Action::End => app.move_selection(i32::MAX as isize),
         Action::OpenInBrowser => app.open_focused(),
+        Action::YankUrl => app.yank_focused_url(),
         Action::NextTab => {
             let next = (app.active_tab + 1) % app.tabs.len();
             app.switch_tab(next);

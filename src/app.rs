@@ -397,14 +397,41 @@ impl App {
     ///   - Pipeline: bitbucket.org/<ws>/<repo>/pipelines/results/<n>
     ///   - Branch: bitbucket.org/<ws>/<repo>/branch/<name>
     pub fn open_focused(&mut self) {
+        let Some(url) = self.focused_url() else {
+            self.status = "no URL for this row".to_string();
+            return;
+        };
+        match webbrowser::open(&url) {
+            Ok(()) => self.status = format!("opened {url}"),
+            Err(e) => self.status = format!("open failed: {e}"),
+        }
+    }
+
+    /// `y` on a focused row — copy the same URL `Enter`/`o` would
+    /// open into the OS clipboard via `pbcopy` / `xclip` / `wl-copy`
+    /// / `clip.exe`. Restores the pre-split mnml palette command
+    /// `bitbucket.copy_selected_url` (and `_pr_url`) that disappeared
+    /// when the BB panes moved to this sibling.
+    pub fn yank_focused_url(&mut self) {
+        let Some(url) = self.focused_url() else {
+            self.status = "no URL for this row".to_string();
+            return;
+        };
+        match crate::clipboard::copy(&url) {
+            Ok(()) => self.status = format!("copied {url}"),
+            Err(e) => self.status = format!("copy failed: {e}"),
+        }
+    }
+
+    /// Pure helper — produces the URL `Enter`/`o`/`y` would act on
+    /// for the focused row. None when the tab is empty or the row
+    /// kind has no canonical URL.
+    fn focused_url(&self) -> Option<String> {
         let tab = self.active();
         let workspace = tab.spec.workspace.clone();
         let repo = tab.spec.repo.clone().unwrap_or_default();
-        let url = match &tab.data {
-            TabData::PullRequests(prs) => match prs.get(tab.selected) {
-                Some(p) => p.html_url(),
-                None => return,
-            },
+        match &tab.data {
+            TabData::PullRequests(prs) => prs.get(tab.selected).and_then(|p| p.html_url()),
             TabData::Pipelines(ps) => ps.get(tab.selected).map(|p| {
                 format!(
                     "https://bitbucket.org/{workspace}/{repo}/pipelines/results/{}",
@@ -414,14 +441,6 @@ impl App {
             TabData::Branches(bs) => bs
                 .get(tab.selected)
                 .map(|b| format!("https://bitbucket.org/{workspace}/{repo}/branch/{}", b.name)),
-        };
-        let Some(url) = url else {
-            self.status = "no URL for this row".to_string();
-            return;
-        };
-        match webbrowser::open(&url) {
-            Ok(()) => self.status = format!("opened {url}"),
-            Err(e) => self.status = format!("open failed: {e}"),
         }
     }
 

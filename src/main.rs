@@ -2,6 +2,7 @@ mod app;
 mod auth;
 mod bitbucket;
 mod blit;
+mod clipboard;
 mod config;
 mod headless;
 mod keys;
