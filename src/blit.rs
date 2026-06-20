@@ -21,8 +21,9 @@ use ratatui::backend::TestBackend;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use tmnl_protocol::{
-    DiffRun, Frame, InputEvent, KeyCode as WireKeyCode, KeyInput, MOD_ALT, MOD_CTRL, MOD_SHIFT,
-    MOD_SUPER, Message, PROTOCOL_VERSION, WireCell, pack_rgba_u8, read_message, write_message,
+    Caps, DiffRun, Frame, InputEvent, KeyCode as WireKeyCode, KeyInput, MOD_ALT, MOD_CTRL,
+    MOD_SHIFT, MOD_SUPER, Message, PROTOCOL_VERSION, WireCell, pack_rgba_u8, read_message,
+    write_message,
 };
 use tokio::time::sleep;
 
@@ -55,6 +56,7 @@ pub async fn run(app: &mut App, socket: &Path) -> Result<()> {
             &mut *w,
             &Message::Hello {
                 version: PROTOCOL_VERSION,
+                caps: Caps::empty(),
             },
         )
         .map_err(|e| anyhow!("blit: hello: {e}"))?;
@@ -170,6 +172,9 @@ pub async fn run(app: &mut App, socket: &Path) -> Result<()> {
                     }
                 }
                 Ok(InputEvent::Mouse(_)) => {}
+                // Focus/Hover/Ime (and any future variants) aren't used
+                // by this app — ignore them, same as Mouse above.
+                Ok(_) => {}
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => return Ok(()),
             }
@@ -187,6 +192,9 @@ pub async fn run(app: &mut App, socket: &Path) -> Result<()> {
             .draw(|frame| draw(frame, app))
             .map_err(|e| anyhow!("blit: draw: {e}"))?;
         let cursor = terminal.get_cursor_position().ok();
+
+        // Pick up a live mnml theme switch before remapping cell colours.
+        crate::theme::poll_refresh();
 
         let buf = terminal.backend().buffer();
         let bw = buf.area.width;
@@ -263,6 +271,7 @@ fn modifier_to_bits(m: Modifier) -> u32 {
 }
 
 fn color_to_rgba(c: Color, is_bg: bool) -> u32 {
+    let c = crate::theme::remap(c);
     match c {
         Color::Rgb(r, g, b) => pack_rgba_u8(r, g, b, 0xff),
         Color::Reset => {

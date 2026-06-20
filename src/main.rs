@@ -6,6 +6,7 @@ mod clipboard;
 mod config;
 mod headless;
 mod keys;
+mod theme;
 mod ui;
 
 use anyhow::{Context, Result};
